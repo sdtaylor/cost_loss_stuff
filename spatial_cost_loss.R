@@ -2,6 +2,7 @@ library(raster)
 library(tidyverse)
 # unconditional simulations on a 100 x 100 grid using gstat
 library(gstat)
+library(doParallel)
 
 #Generate presence/absence observations that simulate either a good (low error)
 #or bad (high error) forecast.
@@ -58,20 +59,24 @@ calculate_loss_cost = function(forecast_raster, observation_raster, L){
 }
 
 ##################################################
+numProcs=2
+cl=makeCluster(numProcs)
+registerDoParallel(cl)
+##################################################
 
 original_extent = 128
 total_km2 = original_extent^2
 spatial_scales = c(1,2,4,8,16,32, 64)
 
-num_runs = 50
+num_runs = 2
 
 treatment_cost = 10
 possible_loss_costs = 10 / seq(0.11, 1, 0.01)
 #Add in denser estimates for low values of C/L
 possible_loss_costs = c(possible_loss_costs, 10 / seq(0.001, 0.1, 0.001))
 
-results = data.frame()
-for(run_i in 1:num_runs){
+results = foreach(run_i = 1:num_runs, .combine=rbind, .packages=c('dplyr','gstat','raster')) %dopar% {
+  results_this_run = data.frame()
   for(model_forecast_error in c(0.01, 0.02, 0.05, 0.1, 0.2, 0.3)){
     probability_surface = get_random_prob_layer(size=original_extent)
     observations = raster::calc(probability_surface, fun=function(x){return(observation_from_probability(x, error=model_forecast_error))})
@@ -95,7 +100,7 @@ for(run_i in 1:num_runs){
         this_scale_loss_cost = calculate_loss_cost(forecast_raster = binary_forecast_upscaled, observation_raster = observations, L = loss_cost)
         this_scale_expense = (this_scale_treatment_cost + this_scale_loss_cost) / total_km2
   
-        results = results %>%
+        results_this_run = results_this_run %>%
           bind_rows(data.frame('forecast_error' = model_forecast_error,
                                'a' = treatment_cost / loss_cost,
                                'spatial_scale' = this_spatial_scale, 
@@ -106,13 +111,8 @@ for(run_i in 1:num_runs){
       }
     }
   }
+  return(results_this_run)
 }
 results$value = with(results, (expense_max - expense_forecast) / (expense_max - expense_perfect))
 
-
-#############################################
-ggplot(filter(results, value>0), aes(y=value, x=a, color=as.factor(spatial_scale), group=as.factor(spatial_scale))) + 
-  geom_point() + 
-  geom_line() +
-  facet_grid(forecast_error~., scales='free_y')
-
+write.csv(results, 'spatial_cost_loss_sim_results.csv', row.names = FALSE)
